@@ -1,0 +1,185 @@
+<!doctype html>
+<html lang="hi">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="theme-color" content="#0d1117">
+<title>My Agent</title>
+<style>
+  :root{--bg:#0d1117;--card:#161b22;--line:#30363d;--tx:#e6edf3;--mut:#8b949e;--acc:#2f81f7;--ok:#3fb950;--bad:#f85149}
+  *{box-sizing:border-box}
+  html,body{height:100%;margin:0}
+  body{background:var(--bg);color:var(--tx);font:16px/1.45 system-ui,sans-serif;display:flex;flex-direction:column}
+  header{display:flex;align-items:center;gap:10px;padding:12px 16px;border-bottom:1px solid var(--line)}
+  header b{flex:1;font-size:18px}
+  #net{font-size:12px;padding:3px 9px;border-radius:99px;border:1px solid var(--line)}
+  #net.on{color:var(--ok);border-color:var(--ok)}
+  #net.off{color:var(--bad);border-color:var(--bad)}
+  button{font:inherit;color:var(--tx);background:var(--card);border:1px solid var(--line);border-radius:10px;padding:8px 14px}
+  button.p{background:var(--acc);border-color:var(--acc);color:#fff}
+  button:disabled{opacity:.5}
+  #chat{flex:1;overflow-y:auto;padding:16px;display:flex;flex-direction:column;gap:10px}
+  .m{max-width:88%;padding:10px 13px;border-radius:14px;white-space:pre-wrap;word-wrap:break-word}
+  .user{align-self:flex-end;background:var(--acc);color:#fff}
+  .bot{align-self:flex-start;background:var(--card);border:1px solid var(--line)}
+  .tool{align-self:flex-start;font-size:13px;color:var(--mut);background:transparent;border:1px dashed var(--line)}
+  .err{align-self:flex-start;color:var(--bad);border:1px solid var(--bad)}
+  form{display:flex;gap:8px;padding:10px 12px;border-top:1px solid var(--line);padding-bottom:max(10px,env(safe-area-inset-bottom))}
+  textarea{flex:1;resize:none;max-height:120px;font:inherit;color:var(--tx);background:var(--card);border:1px solid var(--line);border-radius:12px;padding:10px 12px}
+  dialog{background:var(--card);color:var(--tx);border:1px solid var(--line);border-radius:14px;width:min(92vw,420px);padding:18px}
+  dialog::backdrop{background:#000a}
+  label{display:block;margin:12px 0 4px;color:var(--mut);font-size:14px}
+  input{width:100%;font:inherit;color:var(--tx);background:var(--bg);border:1px solid var(--line);border-radius:10px;padding:10px}
+  .row{display:flex;gap:8px;justify-content:flex-end;margin-top:16px}
+  small{color:var(--mut)}
+</style>
+</head>
+<body>
+<header>
+  <b>My Agent</b>
+  <span id="net"></span>
+  <button id="setBtn" type="button" aria-label="Settings">⚙</button>
+</header>
+
+<main id="chat"></main>
+
+<form id="f">
+  <textarea id="inp" rows="1" placeholder="Kuch likho... (jaise: 25*4 kitna hota hai?)"></textarea>
+  <button id="send" class="p">Bhejo</button>
+</form>
+
+<dialog id="dlg">
+  <b>Settings</b>
+  <label for="key">Gemini API key</label>
+  <input id="key" type="password" autocomplete="off" placeholder="AIza...">
+  <label for="model">Model</label>
+  <input id="model" type="text" value="gemini-flash-latest">
+  <small>Key sirf is phone ke browser mein save hoti hai.</small>
+  <div class="row">
+    <button id="clearChat" type="button">Chat saaf</button>
+    <button id="saveBtn" type="button" class="p">Save</button>
+  </div>
+</dialog>
+
+<script>
+const $ = s => document.querySelector(s);
+const store = {
+  get(k, d){ try{ const v = localStorage.getItem(k); return v === null ? d : v; }catch(e){ return d; } },
+  set(k, v){ try{ localStorage.setItem(k, v); }catch(e){} }
+};
+
+const SYS = "You are a helpful personal assistant running on the user's phone. " +
+  "Reply in the same language the user writes in (Hindi/Hinglish/English), short and simple. " +
+  "Use the tools when the user wants to save or read notes, do math, or know the time.";
+
+/* ---------- Tools (inhe dono modes mein use kar sakte hain) ---------- */
+function notes(){ try{ return JSON.parse(store.get('notes', '[]')); }catch(e){ return []; } }
+const tools = {
+  note_add: ({text}) => {
+    const n = notes(); n.push({t: new Date().toISOString(), text: String(text)});
+    store.set('notes', JSON.stringify(n)); return 'saved. total notes: ' + n.length;
+  },
+  note_list: () => {
+    const n = notes(); return n.length ? n.map((x, i) => (i + 1) + '. ' + x.text).join('\n') : 'no notes yet';
+  },
+  calculator: ({expression}) => {
+    const e = String(expression);
+    if(!/^[0-9+\-*/().%\s^]+$/.test(e)) return 'error: only numbers and + - * / ( ) % ^ allowed';
+    try{ return String(Function('"use strict";return (' + e.replace(/\^/g, '**') + ')')()); }
+    catch(x){ return 'error: bad expression'; }
+  },
+  get_time: () => new Date().toLocaleString('en-IN', {timeZone: 'Asia/Kolkata'})
+};
+const decl = [
+  {name:'note_add', description:'Save a note for the user', parameters:{type:'OBJECT', properties:{text:{type:'STRING', description:'note text'}}, required:['text']}},
+  {name:'note_list', description:'List all saved notes'},
+  {name:'calculator', description:'Evaluate a math expression', parameters:{type:'OBJECT', properties:{expression:{type:'STRING', description:'e.g. 25*4+3'}}, required:['expression']}},
+  {name:'get_time', description:'Get the current date and time in India'}
+];
+
+/* ---------- UI helpers ---------- */
+function add(cls, text){
+  const d = document.createElement('div');
+  d.className = 'm ' + cls; d.textContent = text;
+  $('#chat').appendChild(d); d.scrollIntoView({block:'end'});
+  return d;
+}
+function netStatus(){
+  const el = $('#net'), on = navigator.onLine;
+  el.textContent = on ? 'online' : 'offline';
+  el.className = on ? 'on' : 'off';
+}
+addEventListener('online', netStatus); addEventListener('offline', netStatus); netStatus();
+
+/* ---------- Online brain: Gemini ---------- */
+let history = [];
+async function gemini(){
+  const key = store.get('key', ''), model = store.get('model', 'gemini-flash-latest');
+  if(!key) throw new Error('Pehle ⚙ mein Gemini API key daalo.');
+  const r = await fetch('https://generativelanguage.googleapis.com/v1beta/models/' + encodeURIComponent(model) + ':generateContent', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json', 'x-goog-api-key': key},
+    body: JSON.stringify({systemInstruction:{parts:[{text:SYS}]}, contents: history, tools:[{functionDeclarations: decl}]})
+  });
+  const j = await r.json().catch(() => ({}));
+  if(!r.ok) throw new Error((j.error && j.error.message) || ('HTTP ' + r.status));
+  const c = j.candidates && j.candidates[0];
+  if(!c || !c.content) throw new Error('Khali jawab aaya (shayad safety filter).');
+  return c.content;
+}
+
+/* ---------- Agent loop ---------- */
+async function agent(text){
+  history.push({role:'user', parts:[{text}]});
+  for(let i = 0; i < 5; i++){
+    const c = await gemini();
+    history.push(c);
+    const parts = c.parts || [];
+    const calls = parts.filter(p => p.functionCall);
+    if(!calls.length) return parts.map(p => p.text || '').join('').trim() || '(khali jawab)';
+    const results = calls.map(p => {
+      const f = p.functionCall; let out;
+      try{ out = tools[f.name] ? tools[f.name](f.args || {}) : 'unknown tool'; }
+      catch(e){ out = 'error: ' + e.message; }
+      add('tool', '🔧 ' + f.name + ' → ' + out);
+      return {functionResponse:{name: f.name, response:{result: out}}};
+    });
+    history.push({role:'user', parts: results});
+  }
+  return 'Bahut zyada steps ho gaye, isliye ruk gaya.';
+}
+
+/* ---------- Events ---------- */
+$('#f').addEventListener('submit', async ev => {
+  ev.preventDefault();
+  const text = $('#inp').value.trim();
+  if(!text) return;
+  $('#inp').value = '';
+  add('user', text);
+  if(!navigator.onLine){
+    add('err', 'Abhi offline ho. Offline model agle step mein jodenge. Internet on karke try karo.');
+    return;
+  }
+  $('#send').disabled = true;
+  const wait = add('tool', '... soch raha hoon');
+  try{ wait.remove(); add('bot', await agent(text)); }
+  catch(e){ wait.remove(); add('err', 'Error: ' + e.message); }
+  $('#send').disabled = false;
+});
+
+$('#setBtn').onclick = () => {
+  $('#key').value = store.get('key', '');
+  $('#model').value = store.get('model', 'gemini-flash-latest');
+  $('#dlg').showModal();
+};
+$('#saveBtn').onclick = () => {
+  store.set('key', $('#key').value.trim());
+  store.set('model', $('#model').value.trim() || 'gemini-flash-latest');
+  $('#dlg').close();
+};
+$('#clearChat').onclick = () => { history = []; $('#chat').innerHTML = ''; $('#dlg').close(); };
+
+add('bot', 'Namaste! ⚙ dabao aur Gemini API key daalo. Phir mujhse kuch bhi poocho, jaise "25*4 kitna hota hai?" ya "note likho: kal 8 baje meeting".');
+</script>
+</body>
+</html>
